@@ -7,7 +7,7 @@ import json
 import datetime
 import time
 
-# 屏蔽代理干扰
+# 强力屏蔽代理，确保云端直连数据源
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
@@ -71,7 +71,7 @@ if 'fund_data_store' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 核心函数：全球行情 ---
+# --- 功能函数：全球实时行情 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -81,62 +81,74 @@ def get_global_price(ticker_code):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 核心函数：新浪多源实锤抓取 ---
+# --- 功能函数：多源实锤正式涨跌幅抓取 ---
 def fetch_official_actual(fund_code):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # 源 1：新浪财经 (晚上更新最快，5.78% 这种正式数在这里)
-    try:
-        url = f"http://fund.sina.com.cn/api/openapi.php/FundService.getFundNetValue?symbol={fund_code}&_={int(time.time())}"
-        r = requests.get(url, headers=headers, timeout=5)
-        res = r.json()['result']['data']
-        if res and 'lsu_jz' in res:
-            return {"val": float(res['lsu_jz']), "date": res['fdate'], "source": "新浪财经"}
-    except: pass
-
-    # 源 2：东方财富 (作为备份)
+    # 源 1：东方财富网正式净值接口 (晚上8点后最准)
     try:
         url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1&_={int(time.time())}"
         r = requests.get(url, headers=headers, timeout=5)
         item = r.json()['Datas'][0]
-        return {"val": float(item['JZZZL']), "date": item['FSRQ'], "source": "东财实际"}
+        # JZZZL 是净值增长率
+        return {"val": float(item['JZZZL']), "date": item['FSRQ'], "source": "东方财富"}
+    except: pass
+
+    # 源 2：天天基金实时估值接口 (保底用)
+    try:
+        url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js?rt={int(time.time())}"
+        r = requests.get(url, headers=headers, timeout=5)
+        content = r.text
+        if "{" in content:
+            js_data = json.loads(content[content.find('{'):content.find('}')+1])
+            return {"val": float(js_data['gszzl']), "date": js_data['gztime'], "source": "天天基金"}
     except: pass
     
     return None
 
 # ==========================================
-# 2. 界面显示
+# 2. 侧边栏
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
     id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_data_store.items()}
     def sync_id(): st.session_state.active_id = st.session_state.selector_key
-    st.selectbox("选择基金", options=list(id_map.keys()), format_func=lambda x: id_map[x], 
+    
+    st.selectbox("切换查看基金", options=list(id_map.keys()), format_func=lambda x: id_map[x], 
                  key="selector_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync_id)
     
     active_cfg = st.session_state.fund_data_store[st.session_state.active_id]
     st.divider()
-    new_name = st.text_input("修改名称", value=active_cfg['name'])
+    st.subheader("✏️ 修改基金名称")
+    new_name = st.text_input("重命名并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_data_store[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
+# ==========================================
+# 3. 主界面显示
+# ==========================================
 st.title(f"📈 {active_cfg['name']}")
 
-# --- 持仓表格 ---
-df_h = pd.DataFrame(active_cfg['holdings'])
+df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
-with st.spinner('正在同步全球行情...'):
-    for _, row in df_h.iterrows():
+
+with st.spinner('正在为您同步全球行情...'):
+    for _, row in df_holdings.iterrows():
         code, name, w = str(row['代码']), row['名称'], row['占比']
         info = get_global_price(code)
         if info:
             contrib = info['pct'] * (w / 100)
-            res_rows.append({"代码": code, "名称": name, "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}", 
-                             "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"})
+            res_rows.append({
+                "代码": code, "名称": name,
+                "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}",
+                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"
+            })
             total_w += w
-            total_est += contribution = contrib
-        else: res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
+            total_est += contrib # 修复了这里的语法错误
+        else:
+            res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
+# 上色渲染表格
 def style_row(row):
     c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
     return [c if col in ['现价', '今日涨跌', '贡献'] else '' for col in row.index]
@@ -151,14 +163,14 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown(f"#### 1. 你的加权预估")
     st.markdown(f"<h2 style='color:{'#ff4b4b' if total_est > 0 else '#00ad4c'};'>{total_est:+.3f}%</h2>", unsafe_allow_html=True)
-    st.caption(f"基于 {total_w:.2f}% 前十大重仓")
+    st.caption(f"基于 {total_w:.2f}% 前十大重仓计算")
 
 with col2:
-    st.markdown(f"#### 2. 官方最新实际")
+    st.markdown(f"#### 2. 官方最新实际/估算")
     if official:
-        c = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
-        st.markdown(f"<h2 style='color:{c};'>{official['val']:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"日期: {official['date']} ({official['source']})")
+        color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
+        st.markdown(f"<h2 style='color:{color};'>{official['val']:+.3f}%</h2>", unsafe_allow_html=True)
+        st.caption(f"日期: {official['date']} (来源: {official['source']})")
         act_val = official['val']
     else:
         st.markdown(f"<h2 style='color:grey;'>正在同步...</h2>", unsafe_allow_html=True)
@@ -170,4 +182,5 @@ with col3:
         err = total_est - act_val
         st.markdown(f"<h2 style='color:black;'>{err:+.3f}%</h2>", unsafe_allow_html=True)
         st.caption("预估 > 实际 为正")
-    else: st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
