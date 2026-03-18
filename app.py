@@ -3,113 +3,114 @@ import pandas as pd
 import os
 import yfinance as yf
 
-# 强制屏蔽代理干扰
-os.environ['http_proxy'] = ''
-os.environ['https_proxy'] = ''
+# 强制屏蔽所有代理干扰
+for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
+    os.environ[key] = ''
 
-DB_FILE = "my_fund_assets.csv"
-st.set_page_config(page_title="加权估值工具", layout="centered")
+st.set_page_config(page_title="多基金加权估值工具", layout="centered")
 
-# --- 1. 强力数据加载：自动处理列冲突 ---
-def load_data():
-    target_cols = ['股票代码', '股票名称', '持仓占比']
-    if os.path.exists(DB_FILE):
-        try:
-            df = pd.read_csv(DB_FILE, dtype={'股票代码': str})
-            # 检查关键列是否存在，如果缺列，直接重置
-            if not all(col in df.columns for col in target_cols):
-                return pd.DataFrame(columns=target_cols)
-            return df
-        except:
-            return pd.DataFrame(columns=target_cols)
-    return pd.DataFrame(columns=target_cols)
+# ==========================================
+# 【核心数据仓】在这里管理你的所有基金持仓
+# ==========================================
+DEFAULT_FUNDS = {
+    "基金1：半导体精选": [
+        {"股票代码": "001309", "股票名称": "德明利", "持仓占比": 8.79},
+        {"股票代码": "688525", "股票名称": "佰维存储", "持仓占比": 9.14},
+        {"股票代码": "603986", "股票名称": "兆易创新", "持仓占比": 9.06},
+        {"股票代码": "300475", "股票名称": "香农芯创", "持仓占比": 8.74},
+        {"股票代码": "301308", "股票名称": "江波龙", "持仓占比": 7.97},
+        {"股票代码": "688766", "股票名称": "普冉股份", "持仓占比": 7.90},
+        {"股票代码": "688123", "股票名称": "聚辰股份", "持仓占比": 7.65},
+        {"股票代码": "300223", "股票名称": "北京君正", "持仓占比": 6.19},
+        {"股票代码": "688110", "股票名称": "东芯股份", "持仓占比": 5.80},
+        {"股票代码": "688249", "股票名称": "晶合集成", "持仓占比": 5.56},
+    ],
+    "基金2：AI算力/光模块": [
+        {"股票代码": "300308", "股票名称": "中际旭创", "持仓占比": 9.39},
+        {"股票代码": "002384", "股票名称": "东山精密", "持仓占比": 9.23},
+        {"股票代码": "300502", "股票名称": "新易盛", "持仓占比": 9.11},
+        {"股票代码": "300476", "股票名称": "胜宏科技", "持仓占比": 7.82},
+        {"股票代码": "600183", "股票名称": "生益科技", "持仓占比": 6.75},
+        {"股票代码": "603228", "股票名称": "景旺电子", "持仓占比": 6.10},
+        {"股票代码": "002837", "股票名称": "英维克", "持仓占比": 6.08},
+        {"股票代码": "300394", "股票名称": "天孚通信", "持仓占比": 5.77},
+        {"股票代码": "688313", "股票名称": "仕佳光子", "持仓占比": 5.38},
+        {"股票代码": "688498", "股票名称": "源杰科技", "持仓占比": 4.77},
+    ]
+}
 
-def save_data(df):
-    df.to_csv(DB_FILE, index=False)
-
-# --- 2. 雅虎财经行情 (云端专用) ---
+# --- 行情抓取函数 (Yahoo Finance 版) ---
 def get_yahoo_price(code):
-    # A股后缀：6开头.SS (上海)，其他.SZ (深圳)
+    # 后缀转换逻辑
     ticker_code = f"{code}.SS" if code.startswith('6') else f"{code}.SZ"
     try:
         ticker = yf.Ticker(ticker_code)
-        # 获取两日历史以计算今日涨幅
+        # 获取两日数据计算涨跌幅
         hist = ticker.history(period="2d")
         if len(hist) < 2: return None
-        
         curr_price = hist['Close'].iloc[-1]
         prev_close = hist['Close'].iloc[-2]
         change_pct = (curr_price - prev_close) / prev_close * 100
         return {'price': curr_price, 'pct': change_pct}
-    except:
-        return None
+    except: return None
 
-# --- 3. 界面展示 ---
-st.title("🎯 基金加权估值工具 (云端稳定版)")
+# ==========================================
+# 界面逻辑
+# ==========================================
 
-df_storage = load_data()
-
-# 侧边栏：录入
 with st.sidebar:
-    st.header("📥 录入持仓")
-    with st.form("input_form", clear_on_submit=True):
-        st.info("请输入6位代码 (如 001309)")
-        code_in = st.text_input("股票代码")
-        name_in = st.text_input("股票简称")
-        weight_in = st.number_input("持仓占比 (%)", min_value=0.0, max_value=100.0, step=0.01)
-        
-        if st.form_submit_button("确认录入"):
-            if len(code_in) == 6:
-                if code_in in df_storage['股票代码'].values:
-                    df_storage.loc[df_storage['股票代码'] == code_in, '持仓占比'] = weight_in
-                else:
-                    new_item = pd.DataFrame({'股票代码': [code_in], '股票名称': [name_in], '持仓占比': [weight_in]})
-                    df_storage = pd.concat([df_storage, new_item], ignore_index=True)
-                save_data(df_storage)
-                st.rerun()
+    st.header("📂 基金选择")
+    # 下拉切换基金
+    selected_fund = st.selectbox("请选择要查看的基金", list(DEFAULT_FUNDS.keys()))
     
     st.divider()
-    if st.button("🗑️ 清空所有数据"):
-        if os.path.exists(DB_FILE): os.remove(DB_FILE)
-        st.rerun()
+    st.info(f"📍 当前查看：{selected_fund}\n🌐 数据源：雅虎财经")
+    st.caption("注：数据已固化在代码中，刷新不会消失。")
 
-# 主展示区
+# 主标题
+st.title(f"🚀 {selected_fund}")
+st.subheader("实时加权平均估值明细")
+
+# 获取对应基金的持仓
+fund_data = DEFAULT_FUNDS[selected_fund]
+df_storage = pd.DataFrame(fund_data)
+
 if not df_storage.empty:
-    st.subheader("📋 实时加权计算明细")
     res_rows = []
     total_est = 0.0
     total_w = 0.0
     
-    for _, row in df_storage.iterrows():
-        # 这里增加了防御性检查
-        code = str(row.get('股票代码', ''))
-        name = row.get('股票名称', '--')
-        w = row.get('持仓占比', 0.0)
-        
-        if not code: continue
-        
-        info = get_yahoo_price(code)
-        if info:
-            # 核心计算：贡献 = 涨跌 × 占比
-            contribution = info['pct'] * (w / 100)
-            res_rows.append({
-                "代码": code, "名称": name,
-                "当前价": f"¥{info['price']:.2f}",
-                "今日涨跌": f"{info['pct']:+.2f}%",
-                "占比": f"{w:.2f}%",
-                "贡献": f"{contribution:+.3f}%"
-            })
-            total_w += w
-            total_est += contribution
-        else:
-            res_rows.append({"代码": code, "名称": name, "当前价": "获取失败", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
+    with st.spinner(f'正在为您计算 {selected_fund} 的最新加权波动...'):
+        for _, row in df_storage.iterrows():
+            code = str(row['股票代码'])
+            name = row['股票名称']
+            w = row['持仓占比']
+            
+            info = get_yahoo_price(code)
+            if info:
+                # 核心逻辑：单股贡献 = 今日涨跌 * (占比 / 100)
+                contribution = info['pct'] * (w / 100)
+                res_rows.append({
+                    "代码": code,
+                    "名称": name,
+                    "现价": f"¥{info['price']:.2f}",
+                    "今日涨跌": f"{info['pct']:+.2f}%",
+                    "占比": f"{w:.2f}%",
+                    "贡献净值": f"{contribution:+.3f}%"
+                })
+                total_w += w
+                total_est += contribution
+            else:
+                res_rows.append({"代码": code, "名称": name, "现价": "获取失败", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献净值": "--"})
 
+    # 展示表格
     st.table(pd.DataFrame(res_rows))
     
-    # 结果看板
+    # 底部汇总面板
     st.divider()
-    c1, c2 = st.columns(2)
-    c1.metric("今日基金估值波动", f"{total_est:+.3f}%")
-    c2.metric("累计录入权重", f"{total_w:.2f}%")
+    col1, col2 = st.columns(2)
+    # 这里的估值波动就是 Σ(涨跌*占比)
+    col1.metric(f"今日预估净值涨跌", f"{total_est:+.3f}%")
+    col2.metric("已录入持仓总权重", f"{total_w:.2f}%")
 else:
-    st.info("💡 请在左侧输入股票代码（6位）和占比。")
+    st.warning("暂无持仓数据。")
