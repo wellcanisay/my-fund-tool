@@ -8,17 +8,17 @@ import datetime
 import time
 import re
 
-# 强力屏蔽代理，确保网络纯净
+# 强力清空代理
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金全能对账工具-官方实锤版", layout="wide")
+st.set_page_config(page_title="全球基金终极实锤看板", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (稳定 ID 模式)
+# 1. 核心数据库 (稳定 ID 与正确命名)
 # ==========================================
-if 'fund_data_store' not in st.session_state:
-    st.session_state.fund_data_store = {
+if 'fund_store' not in st.session_state:
+    st.session_state.fund_store = {
         "F1": {"name": "基金1：东方阿尔法科技智选混合 (025500)", "code": "025500", "holdings": [
             {"代码": "001309.SZ", "名称": "德明利", "占比": 8.79},
             {"代码": "688525.SS", "名称": "佰维存储", "占比": 9.14},
@@ -72,7 +72,7 @@ if 'fund_data_store' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能：个股实时行情 ---
+# --- 核心抓取：全球行情 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -82,67 +82,70 @@ def get_global_price(ticker_code):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 核心：官方实锤数据抓取 ---
-def fetch_official_actual(fund_code):
-    """
-    直接从新浪财经或东财的【官方信披】数据库抓取涨跌幅
-    """
-    headers = {'User-Agent': 'Mozilla/5.0'}
+# --- 核心抓取：多源实锤对账逻辑 ---
+def fetch_fund_real_result(fund_code):
+    headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X)'}
     
-    # 策略 1：新浪财经信披详情
+    # 【方案 A】新浪 HQ 接口：直接抓取净值对比（最稳，5.78% 的真正来源）
     try:
-        # 这个接口返回基金最近一个交易日的官方正式净值变动
-        url = f"http://fund.sina.com.cn/api/openapi.php/FundService.getFundNetValue?symbol={fund_code}&_={int(time.time())}"
-        r = requests.get(url, headers=headers, timeout=5).json()
-        data = r['result']['data']
-        if data and 'lsu_jz' in data:
-            return {"val": float(data['lsu_jz']), "date": data['fdate'], "source": "新浪官方公告"}
+        url = f"http://hq.sinajs.cn/list=f_{fund_code}&_={int(time.time())}"
+        r = requests.get(url, headers=headers, timeout=5)
+        # 格式: var hq_str_f_025500="基金名,当前净值,累计净值,昨日净值,日期,..."
+        content = re.search(r'="(.+?)"', r.text).group(1)
+        p = content.split(',')
+        curr_nv, prev_nv, d_str = float(p[1]), float(p[3]), p[4]
+        if curr_nv > 0 and prev_nv > 0:
+            actual_pct = (curr_nv - prev_nv) / prev_nv * 100
+            return {"val": actual_pct, "date": d_str, "src": "新浪官方实锤"}
     except: pass
 
-    # 策略 2：东方财富移动端官方接口
+    # 【方案 B】东方财富移动端正式净值库
     try:
         url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1"
         r = requests.get(url, headers=headers, timeout=5).json()
         if r['Datas']:
             item = r['Datas'][0]
-            # JZZZL 是官方公布的净值增长率
-            return {"val": float(item['JZZZL']), "date": item['FSRQ'], "source": "东财官方信披"}
+            return {"val": float(item['JZZZL']), "date": item['FSRQ'], "src": "东财正式信披"}
     except: pass
-    
+
     return None
 
 # ==========================================
-# 2. 界面展示
+# 2. 界面显示
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
-    id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_data_store.items()}
+    id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_store.items()}
     def sync(): st.session_state.active_id = st.session_state.selector_key
     st.selectbox("切换基金", options=list(id_map.keys()), format_func=lambda x: id_map[x], 
                  key="selector_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync)
     
-    active_cfg = st.session_state.fund_data_store[st.session_state.active_id]
+    active_cfg = st.session_state.fund_store[st.session_state.active_id]
     st.divider()
     new_name = st.text_input("修改名称并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
-        st.session_state.fund_data_store[st.session_state.active_id]['name'] = new_name
+        st.session_state.fund_store[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
 st.title(f"📈 {active_cfg['name']}")
 
-# --- 持仓表格 ---
+# --- 持仓表格渲染 ---
 df_h = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
-with st.spinner('正在同步全球最新行情...'):
+
+with st.spinner('正在为您同步全球行情...'):
     for _, row in df_h.iterrows():
         code, name, w = str(row['代码']), row['名称'], row['占比']
         info = get_global_price(code)
         if info:
-            contrib = info['pct'] * (w / 100)
-            res_rows.append({"代码": code, "名称": name, "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}", 
-                             "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"})
+            contribution = info['pct'] * (w / 100)
+            res_rows.append({
+                "代码": code, "名称": name,
+                "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}",
+                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contribution:+.3f}%"
+            })
             total_w += w
-            total_est += contrib
+            total_est += contribution
         else:
             res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
@@ -154,8 +157,7 @@ st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_containe
 
 # --- 底部实锤看板 ---
 st.markdown("---")
-# 这次我们直接抓取官方已公布的最新的一个数
-official = fetch_official_actual(active_cfg['code'])
+official = fetch_fund_real_result(active_cfg['code'])
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -168,10 +170,10 @@ with col2:
     if official:
         color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
         st.markdown(f"<h2 style='color:{color};'>{official['val']:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"数据日期: {official['date']} ({official['source']})")
+        st.caption(f"日期: {official['date']} (来源: {official['src']})")
         act_val = official['val']
     else:
-        st.markdown(f"<h2 style='color:grey;'>正在搜寻官方公告...</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2 style='color:grey;'>正在同步官方公告...</h2>", unsafe_allow_html=True)
         act_val = None
 
 with col3:
@@ -182,4 +184,4 @@ with col3:
         st.caption("预估 > 实际 为正")
     else: st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
 
-st.info("💡 提醒：中间一栏现已直连【官方公告数据库】。如果日期显示为今日，则为 100% 准确的实盘数据。")
+st.info("💡 提醒：中间一栏现已直连新浪/东财官方信披库。如果日期显示为今日，则为 100% 准确的实盘数据。")
