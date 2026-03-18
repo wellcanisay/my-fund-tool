@@ -3,7 +3,7 @@ import pandas as pd
 import os
 import yfinance as yf
 
-# 强制屏蔽所有代理干扰
+# 强制屏蔽代理干扰
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
@@ -55,9 +55,6 @@ def get_yahoo_price(code):
 
 # --- 表格着色逻辑 ---
 def color_red_green(val):
-    """
-    针对字符串格式的涨跌幅进行着色
-    """
     if not isinstance(val, str): return ''
     if '+' in val: return 'color: red; font-weight: bold'
     if '-' in val: return 'color: green; font-weight: bold'
@@ -69,19 +66,23 @@ def color_red_green(val):
 with st.sidebar:
     st.header("📂 基金管理中心")
     
-    # 基金切换
     fund_list = list(st.session_state.fund_configs.keys())
-    current_selected = st.selectbox("选择要查看的基金", fund_list)
+    # 确保 session_state 跟踪当前选中的基金
+    if 'current_selected' not in st.session_state:
+        st.session_state.current_selected = fund_list[0]
+        
+    current_selected = st.selectbox("选择要查看的基金", fund_list, index=fund_list.index(st.session_state.current_selected))
+    st.session_state.current_selected = current_selected
     
     st.divider()
     
-    # 修改名字的功能
     st.subheader("✏️ 修改当前基金名")
     new_name = st.text_input("输入新名称并回车", value=current_selected)
     
     if new_name != current_selected and new_name.strip() != "":
-        # 更新字典里的键名
+        # 更换字典里的 Key，实现重命名
         st.session_state.fund_configs[new_name] = st.session_state.fund_configs.pop(current_selected)
+        st.session_state.current_selected = new_name
         st.rerun()
 
     st.divider()
@@ -90,10 +91,10 @@ with st.sidebar:
 # ==========================================
 # 3. 主界面显示
 # ==========================================
-st.title(f"📈 {new_name}")
+st.title(f"📈 {st.session_state.current_selected}")
 st.markdown("---")
 
-fund_data = st.session_state.fund_configs[new_name]
+fund_data = st.session_state.fund_configs[st.session_state.current_selected]
 df_raw = pd.DataFrame(fund_data)
 
 if not df_raw.empty:
@@ -113,32 +114,30 @@ if not df_raw.empty:
                     "名称": name,
                     "现价": f"¥{info['price']:.2f}",
                     "今日涨跌": f"{info['pct']:+.2f}%",
-                    "持仓占比": f"{w:.2f}%",
+                    "占比": f"{w:.2f}%",
                     "贡献": f"{contribution:+.3f}%"
                 })
                 total_w += w
                 total_est += contribution
             else:
-                res_rows.append({"代码": code, "名称": name, "现价": "获取失败", "今日涨跌": "--", "持仓占比": f"{w:.2f}%", "贡献": "--"})
+                res_rows.append({"代码": code, "名称": name, "现价": "获取失败", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
-    # 转换为 DataFrame 准备显示
     display_df = pd.DataFrame(res_rows)
 
-    # 【核心需求1】应用红绿颜色样式
-    # 使用 Pandas Styler：subset 指定列名
-    styled_df = display_df.style.applymap(color_red_green, subset=['今日涨跌', '贡献'])
+    # 【核心修复】将 applymap 替换为兼容性更好的 map
+    try:
+        styled_df = display_df.style.map(color_red_green, subset=['今日涨跌', '贡献'])
+    except AttributeError:
+        # 兼容极旧版本的 Pandas
+        styled_df = display_df.style.applymap(color_red_green, subset=['今日涨跌', '贡献'])
 
-    # 显示表格（改用 dataframe 以支持样式）
-    st.dataframe(styled_df, use_container_width=True, height=400)
+    st.dataframe(styled_df, use_container_width=True, height=450)
     
-    # 底部看板
     st.markdown("---")
     col1, col2 = st.columns(2)
     
-    # 计算整体波动的颜色
     est_color = "red" if total_est > 0 else "green"
     col1.markdown(f"#### 今日预估总波动: :{est_color}[{total_est:+.3f}%]")
     col2.markdown(f"#### 已录入持仓权重: {total_w:.2f}%")
-    
 else:
     st.warning("暂无持仓数据。")
