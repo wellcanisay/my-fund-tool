@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 强力屏蔽网络代理，确保云端直连数据源
+# 强力清空网络代理，防止云端请求被拦截
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
 st.set_page_config(page_title="全球基金终极量化对账", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (稳定 ID 锁定，防止菜单乱跳)
+# 1. 核心持仓数据库 (F1-F4)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -71,114 +71,119 @@ if 'fund_db' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能函数：全球个股行情 ---
-def get_stock_data(ticker):
+# --- 功能：个股实时价格 ---
+def get_stock_info(ticker):
     try:
         data = yf.Ticker(ticker).history(period="2d")
         if len(data) < 2: return None
-        c, p = data['Close'].iloc[-1], data['Close'].iloc[-2]
-        return {"price": c, "pct": (c - p) / p * 100}
+        curr, prev = data['Close'].iloc[-1], data['Close'].iloc[-2]
+        return {"price": curr, "pct": (curr - prev) / prev * 100}
     except: return None
 
-# --- 功能函数：量化抓取官方实锤净值 (JZZZL) ---
-def fetch_official_jzzzl(fund_code):
-    """
-    抓取天天基金移动端 API。
-    JZZZL 字段代表官方公布的【日增长率】，也就是实盘对账的最终答案。
-    """
+# --- 功能：双重数据引擎 (估值 + 官方增长率) ---
+def fetch_fund_actual_result(fund_code):
     headers = {'User-Agent': 'Mozilla/5.0'}
+    today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+    # 1. 第一优先级：东财 App 内部结算接口 (抓取实锤增长率 JZZZL)
     try:
-        # 使用移动端 JSON 接口，包含正式的净值增长率
         url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1&_={int(time.time())}"
-        r = requests.get(url, headers=headers, timeout=5)
-        latest = r.json()['Datas'][0]
-        return {
-            "val": float(latest['JZZZL']), # 官方实锤涨跌
-            "date": latest['FSRQ'],       # 官方公布日期
-            "nav": latest['DWJZ']         # 官方单位净值
-        }
-    except: return None
+        r = requests.get(url, timeout=5).json()
+        if r['Datas']:
+            item = r['Datas'][0]
+            # 只要它是今天的日期，或者是 QDII 最新的公告日，我们就认这个实锤数
+            if today_str in item['FSRQ'] or fund_code in ['024239', '018147']:
+                return {"val": float(item['JZZZL']), "date": item['FSRQ'], "label": "✅ 官方正式"}
+    except: pass
+
+    # 2. 第二优先级：天天基金收盘估值 (保底显示你截图里的那个数)
+    try:
+        url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js?rt={int(time.time())}"
+        r = requests.get(url, timeout=5)
+        if "{" in r.text:
+            data = json.loads(r.text[r.text.find('{'):r.text.find('}')+1])
+            # 如果是今天的估算，显示它
+            if today_str in data['gztime']:
+                return {"val": float(data['gszzl']), "date": data['gztime'], "label": "🚩 盘后估算"}
+    except: pass
+    
+    return None
 
 # ==========================================
-# 2. 界面展示
+# 2. UI 界面逻辑
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
     id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_db.items()}
     def on_change(): st.session_state.active_id = st.session_state.sel_key
     
-    st.selectbox("切换查看基金", options=list(id_map.keys()), format_func=lambda x: id_map[x],
+    st.selectbox("选择要查看的基金", options=list(id_map.keys()), format_func=lambda x: id_map[x],
                  key="sel_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=on_change)
     
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
     st.divider()
-    new_name = st.text_input("重命名基金名称", value=active_cfg['name'])
+    new_name = st.text_input("修改名称并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_db[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
-st.title(f"📊 {active_cfg['name']}")
+st.title(f"🚀 {active_cfg['name']}")
 
-# --- 表格逻辑 ---
+# --- 运行计算 ---
 df_h = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
-with st.spinner('同步全球个股行情中...'):
+with st.spinner('同步实时行情中...'):
     for _, row in df_h.iterrows():
-        info = get_stock_data(row['代码'])
+        info = get_stock_info(row['代码'])
         if info:
             contrib = info['pct'] * (row['占比'] / 100)
             res_rows.append({
                 "代码": row['代码'], "名称": row['名称'],
                 "现价": f"¥{info['price']:.2f}" if "." in row['代码'] else f"${info['price']:.2f}",
-                "今日涨跌": f"{info['pct']:+.2f}%", "持仓占比": f"{row['占比']:.2f}%", "贡献": f"{contrib:+.3f}%"
+                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{row['占比']:.2f}%", "贡献": f"{contrib:+.3f}%"
             })
             total_est += contrib
             total_w += row['占比']
         else:
-            res_rows.append({"代码": row['代码'], "名称": row['名称'], "现价": "--", "今日涨跌": "--", "持仓占比": f"{row['占比']:.2f}%", "贡献": "--"})
+            res_rows.append({"代码": row['代码'], "名称": row['名称'], "现价": "--", "今日涨跌": "--", "占比": f"{row['占比']:.2f}%", "贡献": "--"})
 
 # 上色渲染
-def style_row(row):
+def style_fn(row):
     c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
     return [c if col in ['今日涨跌', '贡献', '现价'] else '' for col in row.index]
 
-st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=420)
+st.dataframe(pd.DataFrame(res_rows).style.apply(style_fn, axis=1), use_container_width=True, height=420)
 
 # --- 底部对账面板 ---
 st.markdown("---")
-actual = fetch_official_jzzzl(active_cfg['code'])
-today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+official = fetch_fund_actual_result(active_cfg['code'])
 
 c1, c2, c3 = st.columns(3)
 with c1:
     st.markdown("#### 1. 你的加权预估")
     color = "#ff4b4b" if total_est > 0 else "#00ad4c"
     st.markdown(f"<h1 style='color:{color};'>{total_est:+.3f}%</h1>", unsafe_allow_html=True)
-    st.caption(f"基于 {total_w:.2f}% 权重计算")
+    st.caption(f"基于 {total_w:.2f}% 前十大重仓计算")
 
 with c2:
     st.markdown("#### 2. 官方今日实锤")
-    if actual:
-        # 判断日期是否为今日，或者是 QDII 的最新日期
-        is_today = today_str in actual['date']
-        label = "✅ 官方正式净值" if is_today else "📅 历史净值"
-        
-        color = "#ff4b4b" if actual['val'] > 0 else "#00ad4c"
-        st.markdown(f"<h1 style='color:{color};'>{actual['val']:+.2f}%</h1>", unsafe_allow_html=True)
-        st.caption(f"{label}: {actual['date']} (NAV: {actual['nav']})")
-        actual_val = actual['val']
+    if official:
+        color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
+        st.markdown(f"<h1 style='color:{color};'>{official['val']:+.2f}%</h1>", unsafe_allow_html=True)
+        st.caption(f"{official['label']}: {official['date']}")
+        act_val = official['val']
     else:
         st.markdown("<h1 style='color:grey;'>同步中...</h1>", unsafe_allow_html=True)
-        actual_val = None
+        act_val = None
 
 with c3:
     st.markdown("#### 3. 预估误差")
-    if actual_val is not None:
-        err = total_est - actual_val
+    if act_val is not None:
+        err = total_est - act_val
         st.markdown(f"<h1>{err:+.3f}%</h1>", unsafe_allow_html=True)
         st.caption("预估 > 实际 为正")
     else:
         st.markdown("<h1 style='color:grey;'>--</h1>", unsafe_allow_html=True)
 
-st.info("💡 对账核心逻辑：中间一栏直接调取天天基金移动 App 的【JZZZL】数据库。只要官方确认了分数，这里就会亮起 100% 准确的实盘结果。")
+st.info("💡 对账说明：下午 15:00 后显示天天基金【盘后估算】；晚上 20:00 后，只要官方录入了正式成绩单，系统会自动替换为【官方正式】实锤数据。")
