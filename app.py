@@ -5,14 +5,14 @@ import yfinance as yf
 import requests
 import json
 
-# 强制屏蔽所有代理干扰
+# 强制屏蔽代理
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金全能对账工具", layout="wide")
+st.set_page_config(page_title="多基金对账工具-透明版", layout="wide")
 
 # ==========================================
-# 1. 核心持仓数据库 (名称已修正)
+# 1. 核心数据库 (持仓未变)
 # ==========================================
 if 'fund_configs' not in st.session_state:
     st.session_state.fund_configs = {
@@ -78,7 +78,7 @@ if 'fund_configs' not in st.session_state:
         }
     }
 
-# --- 核心抓取：跨国行情 ---
+# --- 抓取函数 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -90,26 +90,29 @@ def get_global_price(ticker_code):
         return {'price': curr_price, 'pct': change_pct}
     except: return None
 
-# --- 核心抓取：国内基金官方净值/估算 ---
-def get_actual_fund_change(fund_code):
+def get_tt_data(fund_code):
+    """
+    抓取天天基金数据，返回：涨跌幅, 更新时间, 数据日期
+    """
     try:
         url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js"
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         content = r.text
         start, end = content.find('{'), content.find('}')
         data = json.loads(content[start:end+1])
-        return float(data['gszzl'])
+        # gszzl: 估算涨跌, gztime: 估算时间, jzrq: 最后净值日期
+        return {
+            "val": float(data['gszzl']),
+            "time": data['gztime'],
+            "last_date": data['jzrq']
+        }
     except: return None
 
-# --- UI 样式：红绿逻辑 ---
+# --- UI 样式 ---
 def style_financial_table(row):
     color = ''
-    if '+' in str(row['今日涨跌']):
-        color = 'color: #ff4b4b; font-weight: bold'
-    elif '-' in str(row['今日涨跌']):
-        color = 'color: #00ad4c; font-weight: bold'
-    
-    # 仅针对 现价、今日涨跌、贡献 三列上色
+    if '+' in str(row['今日涨跌']): color = 'color: #ff4b4b; font-weight: bold'
+    elif '-' in str(row['今日涨跌']): color = 'color: #00ad4c; font-weight: bold'
     return [color if col in ['现价', '今日涨跌', '贡献'] else '' for col in row.index]
 
 # ==========================================
@@ -120,18 +123,9 @@ with st.sidebar:
     fund_names = list(st.session_state.fund_configs.keys())
     if 'current_selected' not in st.session_state:
         st.session_state.current_selected = fund_names[0]
-    
     selected_name = st.selectbox("选择基金", fund_names, index=fund_names.index(st.session_state.current_selected))
     st.session_state.current_selected = selected_name
     
-    st.divider()
-    st.subheader("✏️ 修改基金名称")
-    new_name = st.text_input("重命名并回车", value=selected_name)
-    if new_name != selected_name and new_name.strip() != "":
-        st.session_state.fund_configs[new_name] = st.session_state.fund_configs.pop(selected_name)
-        st.session_state.current_selected = new_name
-        st.rerun()
-
 st.title(f"🚀 {st.session_state.current_selected}")
 
 current_cfg = st.session_state.fund_configs[st.session_state.current_selected]
@@ -141,7 +135,7 @@ if not df_holdings.empty:
     res_rows = []
     total_est, total_w = 0.0, 0.0
     
-    with st.spinner('正在同步全球行情...'):
+    with st.spinner('正在同步行情...'):
         for _, row in df_holdings.iterrows():
             code, name, w = str(row['代码']), row['名称'], row['占比']
             info = get_global_price(code)
@@ -151,45 +145,57 @@ if not df_holdings.empty:
                     "代码": code, "名称": name,
                     "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}",
                     "今日涨跌": f"{info['pct']:+.2f}%",
-                    "持仓占比": f"{w:.2f}%",
+                    "占比": f"{w:.2f}%",
                     "贡献": f"{contribution:+.3f}%"
                 })
                 total_w += w
                 total_est += contribution
             else:
-                res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "持仓占比": f"{w:.2f}%", "贡献": "--"})
+                res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
-    # 显示持仓表格
+    # 持仓表
     display_df = pd.DataFrame(res_rows)
     styled_df = display_df.style.apply(style_financial_table, axis=1)
     st.dataframe(styled_df, use_container_width=True, height=420)
 
-    # --- 底部三位一体看板 ---
+    # --- 底部对账看板 (核心升级) ---
     st.markdown("---")
-    actual_change = get_actual_fund_change(current_cfg['code'])
-    error_val = (total_est - actual_change) if actual_change is not None else None
-
-    c_est = "#ff4b4b" if total_est > 0 else "#00ad4c"
-    c_act = "#ff4b4b" if (actual_change or 0) > 0 else "#00ad4c"
+    tt_data = get_tt_data(current_cfg['code'])
     
     col1, col2, col3 = st.columns(3)
+    
     with col1:
         st.markdown(f"#### 1. 你的加权预估")
-        st.markdown(f"<h2 style='color:{c_est};'>{total_est:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"基于 {total_w:.2f}% 权重计算")
+        color = "#ff4b4b" if total_est > 0 else "#00ad4c"
+        st.markdown(f"<h2 style='color:{color};'>{total_est:+.3f}%</h2>", unsafe_allow_html=True)
+        st.caption(f"基于 {total_w:.2f}% 前十大重仓计算")
+
     with col2:
-        st.markdown(f"#### 2. 官方实际/估算")
-        if actual_change is not None:
-            st.markdown(f"<h2 style='color:{c_act};'>{actual_change:+.3f}%</h2>", unsafe_allow_html=True)
-            st.caption("来源：天天基金实时/收盘数据")
+        if tt_data:
+            # 判断是估算还是实际：看 time 的日期是否是今天
+            import datetime
+            is_today = str(datetime.date.today()) in tt_data['time']
+            label = "🚩 天天基金·实时估算" if is_today else "✅ 官方正式净值"
+            
+            st.markdown(f"#### 2. {label}")
+            color = "#ff4b4b" if tt_data['val'] > 0 else "#00ad4c"
+            st.markdown(f"<h2 style='color:{color};'>{tt_data['val']:+.3f}%</h2>", unsafe_allow_html=True)
+            st.caption(f"更新时间: {tt_data['time']}")
+            actual_val = tt_data['val']
         else:
-            st.markdown(f"<h2 style='color:grey;'>等待公布...</h2>", unsafe_allow_html=True)
+            st.markdown(f"#### 2. 官方实际/估算")
+            st.markdown(f"<h2 style='color:grey;'>等待更新...</h2>", unsafe_allow_html=True)
+            actual_val = None
+
     with col3:
         st.markdown(f"#### 3. 预估误差")
-        if error_val is not None:
-            st.markdown(f"<h2 style='color:black;'>{error_val:+.3f}%</h2>", unsafe_allow_html=True)
-            st.caption("误差 = 预估 - 实际")
+        if actual_val is not None:
+            diff = total_est - actual_val
+            st.markdown(f"<h2 style='color:black;'>{diff:+.3f}%</h2>", unsafe_allow_html=True)
+            st.caption("预估 > 实际 为正")
         else:
             st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
-else:
-    st.warning("暂无持仓数据。")
+
+    # 解释说明
+    if tt_data and is_today:
+        st.warning(f"⚠️ 注意：当前官方数据为【收盘估算】，正式净值通常在 21:00-24:00 之间公布。当前显示的误差是你的前十大预估与天天全仓估算的偏差。")
