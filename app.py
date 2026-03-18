@@ -7,14 +7,14 @@ import json
 import datetime
 import re
 
-# 强制屏蔽代理
+# 1. 强力清除所有网络代理
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金全能工具-晚上8点准时版", layout="wide")
+st.set_page_config(page_title="全球基金全能工具-多源校准版", layout="wide")
 
 # ==========================================
-# 1. 核心数据库
+# 2. 核心数据库
 # ==========================================
 if 'fund_data_store' not in st.session_state:
     st.session_state.fund_data_store = {
@@ -71,7 +71,7 @@ if 'fund_data_store' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能函数 ---
+# --- 功能函数：全球个股 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -81,56 +81,66 @@ def get_global_price(ticker_code):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-def get_official_net_value(fund_code):
-    """
-    晚上8点后抓取正式净值，包含最新的涨跌幅
-    """
+# --- 功能函数：多源抓取基金正式净值 ---
+def fetch_actual_net_value(fund_code):
+    # 源 1：东方财富移动版 API (更新最快，通常 19:00-21:00 更新)
     try:
-        # 抓取天天基金详情页数据
-        url = f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        # 提取当前涨跌幅: fS_refer_gr
-        pct_match = re.search(r'fS_refer_gr="([^"]+)"', r.text)
-        time_match = re.search(r'fS_refer_time="([^"]+)"', r.text)
-        
-        if pct_match and time_match:
-            return {"val": float(pct_match.group(1)), "time": time_match.group(1)}
+        url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1&deviceid=Wap&plat=Wap"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if data['Datas']:
+            item = data['Datas'][0]
+            return {
+                "val": float(item['JZZZL']), # 净值增长率
+                "date": item['FSRQ'],       # 净值日期
+                "source": "东方财富正式数据"
+            }
     except: pass
-    
-    # 如果详情页没更新，退回到估算接口
+
+    # 源 2：天天基金估值接口 (备份)
     try:
         url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js"
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        data = json.loads(r.text[r.text.find('{'):r.text.find('}')+1])
-        return {"val": float(data['gszzl']), "time": data['gztime']}
-    except: return None
+        r = requests.get(url, timeout=5)
+        content = r.text
+        json_data = json.loads(content[content.find('{'):content.find('}')+1])
+        return {
+            "val": float(json_data['gszzl']),
+            "date": json_data['gztime'],
+            "source": "天天基金实时估算"
+        }
+    except: pass
+    
+    return None
+
+# --- UI 样式 ---
+def style_row(row):
+    c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
+    return [c if col in ['现价', '今日涨跌', '贡献'] else '' for col in row.index]
 
 # ==========================================
-# 2. 界面显示
+# 3. 界面显示
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
     id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_data_store.items()}
-    
     def sync_id(): st.session_state.active_id = st.session_state.selector_key
     st.selectbox("切换基金", options=list(id_map.keys()), format_func=lambda x: id_map[x], key="selector_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync_id)
     
     active_cfg = st.session_state.fund_data_store[st.session_state.active_id]
     st.divider()
-    st.subheader("✏️ 修改名称")
-    new_name = st.text_input("重命名", value=active_cfg['name'])
+    st.subheader("✏️ 修改基金名称")
+    new_name = st.text_input("重命名并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_data_store[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
-st.title(f"📈 {active_cfg['name']}")
+st.title(f"🚀 {active_cfg['name']}")
 
-# 持仓表格
-df_h = pd.DataFrame(active_cfg['holdings'])
+df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
-with st.spinner('同步实时行情...'):
-    for _, row in df_h.iterrows():
+with st.spinner('正在同步全球实时行情...'):
+    for _, row in df_holdings.iterrows():
         code, name, w = str(row['代码']), row['名称'], row['占比']
         info = get_global_price(code)
         if info:
@@ -138,19 +148,14 @@ with st.spinner('同步实时行情...'):
             res_rows.append({"代码": code, "名称": name, "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}", "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contribution:+.3f}%"})
             total_w += w
             total_est += contribution
-        else: res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
-
-def style_row(row):
-    c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
-    return [c if col in ['现价', '今日涨跌', '贡献'] else '' for col in row.index]
+        else:
+            res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
 st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=420)
 
-# --- 底部对账看板 (8点强化版) ---
+# --- 底部对账看板 (多源校准版) ---
 st.markdown("---")
-official = get_official_net_value(active_cfg['code'])
-today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-now_hour = datetime.datetime.now().hour
+official = fetch_actual_net_value(active_cfg['code'])
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -159,18 +164,14 @@ with col1:
     st.caption(f"基于 {total_w:.2f}% 前十大重仓计算")
 
 with col2:
-    # 逻辑：晚上8点后，只要有数据就显示，并标注是否为今日数据
-    st.markdown(f"#### 2. 官方实际/估算")
+    st.markdown(f"#### 2. 最新官方实际/估算")
     if official:
-        is_today = today_str in official['time']
-        label = "✅ 官方正式净值" if (is_today and now_hour >= 20) else "🚩 实时估算/旧净值"
-        
         color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
         st.markdown(f"<h2 style='color:{color};'>{official['val']:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"{label} (时间: {official['time']})")
+        st.caption(f"数据日期: {official['date']}\n来源: {official['source']}")
         actual_val = official['val']
     else:
-        st.markdown(f"<h2 style='color:grey;'>等待更新...</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2 style='color:grey;'>数据更新中...</h2>", unsafe_allow_html=True)
         actual_val = None
 
 with col3:
@@ -179,6 +180,7 @@ with col3:
         err = total_est - actual_val
         st.markdown(f"<h2 style='color:black;'>{err:+.3f}%</h2>", unsafe_allow_html=True)
         st.caption("预估 > 实际 为正")
-    else: st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
 
-st.info("💡 晚上8点后，系统将自动尝试从官方详情页抓取最新净值。由于 QDII 存在时差，基金 3、4 今晚显示的通常是上一交易日的最终表现。")
+st.info("💡 提醒：QDII 基金 (基金 3、4) 官方数据通常于深夜或次日更新。如果误差过大，请确认官方数据日期是否为最新。")
