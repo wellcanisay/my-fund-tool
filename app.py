@@ -7,11 +7,11 @@ import json
 import datetime
 import time
 
-# 强制清空代理，确保直连
+# 强制清空代理，确保云端直连
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金终极实锤对账", layout="wide")
+st.set_page_config(page_title="全球基金终极对账-实锤版", layout="wide")
 
 # ==========================================
 # 1. 核心数据库 (稳定 ID 模式)
@@ -71,7 +71,7 @@ if 'fund_data_store' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 抓取个股实时行情 ---
+# --- 功能函数 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -81,31 +81,21 @@ def get_global_price(ticker_code):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 【核心】模仿专业 API 逻辑，抓取正式净值变动 ---
-def fetch_official_truth(fund_code):
+def fetch_truth_data(fund_code):
     """
-    不看估值，直接去历史净值序列里抓最新的一条。
-    这是 5.78% 的唯一合法来源。
+    通过东财历史净值序列接口，抓取真正实锤的增长率 (JZZZL)
     """
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 这是一个东财 App 内部使用的 JSON 接口，包含正式日增长率 JZZZL
-        url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=5&_={int(time.time())}"
+        url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1&_={int(time.time())}"
         r = requests.get(url, headers=headers, timeout=5)
-        data = r.json()
-        if data['Datas']:
-            # 拿到第一条（最新的）成绩单
-            item = data['Datas'][0]
-            return {
-                "val": float(item['JZZZL']), # 净值增长率
-                "date": item['FSRQ'],       # 净值日期
-                "source": "官方正式信披"
-            }
-    except:
-        return None
+        item = r.json()['Datas'][0]
+        # JZZZL 就是你要的正式涨跌幅数字
+        return {"val": float(item['JZZZL']), "date": item['FSRQ']}
+    except: return None
 
 # ==========================================
-# 2. 侧边栏与布局
+# 2. 交互逻辑 (防止乱跳)
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
@@ -115,59 +105,64 @@ with st.sidebar:
                  key="selector_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync_id)
     active_cfg = st.session_state.fund_data_store[st.session_state.active_id]
     st.divider()
-    new_name = st.text_input("重命名基金", value=active_cfg['name'])
+    new_name = st.text_input("重命名并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_data_store[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
+# ==========================================
+# 3. 主界面显示
+# ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# --- 3. 持仓表格渲染 ---
+# 运行持仓计算
 df_h = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
-
-with st.spinner('同步全球最新行情...'):
+with st.spinner('正在同步全球持仓行情...'):
     for _, row in df_h.iterrows():
         code, name, w = str(row['代码']), row['名称'], row['占比']
         info = get_global_price(code)
         if info:
-            contrib = info['pct'] * (w / 100)
-            res_rows.append({
-                "代码": code, "名称": name,
-                "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}",
-                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"
-            })
+            pct = info['pct']
+            contrib = pct * (w / 100)
+            res_rows.append({"代码": code, "名称": name, 
+                             "现价": f"¥{info['price']:.2f}" if "." in code else f"${info['price']:.2f}", 
+                             "今日涨跌": f"{pct:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"})
             total_w += w
             total_est += contrib
         else:
             res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
-def style_row(row):
+# 上色渲染表格
+def style_fn(row):
     c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
     return [c if col in ['现价', '今日涨跌', '贡献'] else '' for col in row.index]
 
-st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=420)
+st.dataframe(pd.DataFrame(res_rows).style.apply(style_fn, axis=1), use_container_width=True, height=420)
 
-# --- 4. 底部实锤看板 (采用实测逻辑) ---
+# --- 底部实锤看板 ---
 st.markdown("---")
-# 直接抓取最新的实锤数值
-official = fetch_official_truth(active_cfg['code'])
+truth = fetch_truth_data(active_cfg['code'])
+today_str = datetime.datetime.now().strftime('%Y-%m-%d')
 
 col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown(f"#### 1. 你的加权预估")
     st.markdown(f"<h2 style='color:{'#ff4b4b' if total_est > 0 else '#00ad4c'};'>{total_est:+.3f}%</h2>", unsafe_allow_html=True)
-    st.caption(f"基于前十大重仓 ({total_w:.2f}%) 计算")
+    st.caption(f"基于 {total_w:.2f}% 持仓权重")
 
 with col2:
-    st.markdown(f"#### 2. 官方最新实际涨跌")
-    if official:
-        color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
-        st.markdown(f"<h2 style='color:{color};'>{official['val']:+.2f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"日期: {official['date']} (来源: {official['source']})")
-        act_val = official['val']
+    st.markdown(f"#### 2. 官方今日实锤涨跌")
+    # 核心判断逻辑
+    is_today = truth and today_str in truth['date']
+    if is_today:
+        color = "#ff4b4b" if truth['val'] > 0 else "#00ad4c"
+        st.markdown(f"<h2 style='color:{color};'>{truth['val']:+.2f}%</h2>", unsafe_allow_html=True)
+        st.caption(f"日期: {truth['date']} (来源: 官方成绩单)")
+        act_val = truth['val']
     else:
-        st.markdown(f"<h2 style='color:grey;'>正在同步官方公告...</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2 style='color:grey;'>等待官方揭晓...</h2>", unsafe_allow_html=True)
+        st.caption(f"当前时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
         act_val = None
 
 with col3:
@@ -179,4 +174,4 @@ with col3:
     else:
         st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
 
-st.info("💡 提示：本工具现已接入【官方正式净值序列】。只要基金公司公布了今日成绩单，中间一栏即为 100% 准确的实测数据。")
+st.info("💡 提示：本工具现已接入【官方正式净值序列】。只要基金公司公布了今日成绩单，中间一栏即为 100% 准确的实盘数据。")
