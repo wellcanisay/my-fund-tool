@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 屏蔽代理
+# 强制屏蔽代理
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金全能工具-最终对账版", layout="wide")
+st.set_page_config(page_title="全球基金终极对账工具", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (稳定 ID 模式)
+# 1. 核心数据库 (稳定 ID 逻辑)
 # ==========================================
 if 'fund_data_store' not in st.session_state:
     st.session_state.fund_data_store = {
@@ -71,7 +71,7 @@ if 'fund_data_store' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能：个股行情 ---
+# --- 功能：全球个股实时涨跌 ---
 def get_global_price(ticker_code):
     try:
         ticker = yf.Ticker(ticker_code)
@@ -81,46 +81,29 @@ def get_global_price(ticker_code):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 功能：三源动态对账 ---
-def fetch_best_actual_data(fund_code):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    # 1. 保底源：天天基金估值 (15:00 的基础数据)
-    base_data = None
+# --- 功能：抓取“养基宝/天天基金”同款正式涨跌幅 ---
+def fetch_official_nav_change(fund_code):
+    """
+    通过东财 App 内部接口抓取真正的【日增长率】
+    """
     try:
-        r = requests.get(f"https://fundgz.1234567.com.cn/js/{fund_code}.js", headers=headers, timeout=3)
-        if "{" in r.text:
-            js_data = json.loads(r.text[r.text.find('{'):r.text.find('}')+1])
-            base_data = {"val": float(js_data['gszzl']), "time": js_data['gztime'], "src": "盘后估算"}
-    except: pass
-
-    # 2. 冲刺源：新浪财经 (晚上 8 点后的正式净值)
-    try:
-        # 新浪接口：返回最近一天的正式变动
-        r = requests.get(f"http://hq.sinajs.cn/list=f_{fund_code}", headers=headers, timeout=3)
-        if "," in r.text:
-            parts = r.text.split(',')
-            # 新浪格式较复杂，通常第1位是名称，第2位是净值，我们要算涨跌需配合历史，
-            # 简化逻辑：如果新浪返回的时间是今天，且数据存在，我们尝试用它
-            # 由于新浪接口解析成本高，我们这里改用东财移动API作为正式源
-            pass
-    except: pass
-
-    # 3. 核心源：东财移动API (晚上 8 点后最稳)
-    try:
-        url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=1"
-        r = requests.get(url, headers=headers, timeout=3)
-        res = r.json()
-        if res['Datas']:
-            item = res['Datas'][0]
-            # 如果东财出了正式净值增长率(JZZZL)，它就是“实锤”
-            return {"val": float(item['JZZZL']), "time": item['FSRQ'], "src": "官方正式"}
-    except: pass
-
-    return base_data
+        # 这个接口返回历史净值列表，第一条就是最新的“实锤”数据
+        url = f"https://fundmobapi.eastmoney.com/FundMApi/FundNetList.ashx?FCODE={fund_code}&pageIndex=1&pageSize=5&_={int(time.time())}"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if data['Datas']:
+            # 拿到最近的一条记录
+            latest = data['Datas'][0]
+            return {
+                "val": float(latest['JZZZL']), # 净值增长率 (也就是你要的 5.78% 这种数)
+                "date": latest['FSRQ'],       # 净值日期
+                "source": "官方净值数据"
+            }
+    except Exception as e:
+        return None
 
 # ==========================================
-# 2. 界面展示
+# 2. 界面布局
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
@@ -128,19 +111,20 @@ with st.sidebar:
     def sync(): st.session_state.active_id = st.session_state.selector_key
     st.selectbox("切换基金", options=list(id_map.keys()), format_func=lambda x: id_map[x], 
                  key="selector_key", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync)
+    
     active_cfg = st.session_state.fund_data_store[st.session_state.active_id]
     st.divider()
-    new_name = st.text_input("重命名", value=active_cfg['name'])
+    new_name = st.text_input("重命名并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_data_store[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
 st.title(f"🚀 {active_cfg['name']}")
 
-# --- 持仓表格 ---
+# --- 1. 持仓表格渲染 ---
 df_h = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
-with st.spinner('正在同步全球行情...'):
+with st.spinner('同步全球最新行情中...'):
     for _, row in df_h.iterrows():
         code, name, w = str(row['代码']), row['名称'], row['占比']
         info = get_global_price(code)
@@ -159,35 +143,34 @@ def style_row(row):
 
 st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=420)
 
-# --- 底部对账看板 ---
+# --- 2. 底部对账看板 (实锤版) ---
 st.markdown("---")
-official = fetch_best_actual_data(active_cfg['code'])
+official = fetch_official_nav_change(active_cfg['code'])
 
 col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown(f"#### 1. 你的加权预估")
     st.markdown(f"<h2 style='color:{'#ff4b4b' if total_est > 0 else '#00ad4c'};'>{total_est:+.3f}%</h2>", unsafe_allow_html=True)
-    st.caption(f"基于 {total_w:.2f}% 权重计算")
+    st.caption(f"基于 {total_w:.2f}% 重仓权重计算")
 
 with col2:
+    st.markdown(f"#### 2. 官方最新实际涨跌")
     if official:
-        label = f"✅ {official['src']}" if official['src'] == "官方正式" else f"🚩 {official['src']}"
-        st.markdown(f"#### 2. {label}")
         color = "#ff4b4b" if official['val'] > 0 else "#00ad4c"
-        st.markdown(f"<h2 style='color:{color};'>{official['val']:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption(f"数据时间: {official['time']}")
-        act_val = official['val']
+        st.markdown(f"<h2 style='color:{color};'>{official['val']:+.2f}%</h2>", unsafe_allow_html=True)
+        st.caption(f"官方更新日期: {official['date']}")
+        actual_val = official['val']
     else:
-        st.markdown(f"#### 2. 官方实际/估算")
-        st.markdown(f"<h2 style='color:grey;'>搜寻中...</h2>", unsafe_allow_html=True)
-        act_val = None
+        st.markdown(f"<h2 style='color:grey;'>正在同步...</h2>", unsafe_allow_html=True)
+        actual_val = None
 
 with col3:
     st.markdown(f"#### 3. 预估误差")
-    if act_val is not None:
-        err = total_est - act_val
+    if actual_val is not None:
+        err = total_est - actual_val
         st.markdown(f"<h2 style='color:black;'>{err:+.3f}%</h2>", unsafe_allow_html=True)
-        st.caption("预估 > 实际 为正")
-    else: st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
+        st.caption("正数代表估值偏高")
+    else:
+        st.markdown(f"<h2 style='color:grey;'>--</h2>", unsafe_allow_html=True)
 
-st.info("💡 逻辑说明：白天显示天天基金估算；晚上 8 点后，若官方公布了正式净值，系统会自动抓取并替换，实现精准对账。")
+st.info("💡 对账提醒：中间一栏现在直接抓取官方正式净值。由于 QDII 基金 (基金 3、4) 的净值更新通常在深夜或次日早晨，请确认日期是否为你想要核对的那一天。")
