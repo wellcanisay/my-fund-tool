@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 屏蔽代理干扰，确保云端网络环境纯度
+# 强制屏蔽代理干扰，确保云端网络环境直通数据源
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金量化对账终极版", layout="wide")
+st.set_page_config(page_title="全球基金量化对账-北京时间版", layout="wide")
 
 # ==========================================
-# 1. 核心持仓数据库 (F1-F5 完整校准)
+# 1. 核心持仓数据库 (F1-F5 完整校准版)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -48,7 +48,7 @@ if 'fund_db' not in st.session_state:
             {"代码": "GOOG", "名称": "谷歌-C", "占比": 6.98},
             {"代码": "TSM", "名称": "台积电(ADR)", "占比": 6.72},
             {"代码": "AAPL", "名称": "苹果", "占比": 2.00},
-            {"代码": "LITE", "名称": "Lumentum", "占比": 1.98}, # 校准代码
+            {"代码": "LITE", "名称": "Lumentum", "占比": 1.98}, # 校准: LITE
             {"代码": "COHR", "名称": "Coherent", "占比": 1.94},
             {"代码": "CIEN", "名称": "Ciena", "占比": 1.30},
             {"代码": "TTMI", "名称": "TTM科技", "占比": 1.29},
@@ -57,12 +57,12 @@ if 'fund_db' not in st.session_state:
         "F4": {"name": "基金4：建信新兴市场混合QDII (018147)", "code": "018147", "holdings": [
             {"代码": "NVDA", "名称": "英伟达", "占比": 9.86},
             {"代码": "000660.KS", "名称": "SK海力士", "占比": 9.79},
-            {"代码": "TSM", "名称": "台积电(ADR)", "占比": 9.07}, # 修正为美股代码
+            {"代码": "TSM", "名称": "台积电(ADR)", "占比": 9.07}, # 校准: TSM 美股
             {"代码": "AVGO", "名称": "博通", "占比": 7.98},
             {"代码": "005930.KS", "名称": "三星电子", "占比": 5.44},
             {"代码": "GLW", "名称": "康宁", "占比": 4.45},
             {"代码": "MPWR", "名称": "Monolithic", "占比": 3.89},
-            {"代码": "LITE", "名称": "Lumentum", "占比": 3.79}, # 校准代码
+            {"代码": "LITE", "名称": "Lumentum", "占比": 3.79}, # 校准: LITE
             {"代码": "CRDO", "名称": "Credo", "占比": 2.38},
             {"代码": "2317.TW", "名称": "鸿海精密", "占比": 2.35},
         ]},
@@ -83,7 +83,7 @@ if 'fund_db' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能函数：全球个股行情 ---
+# --- 核心函数：全球行情 ---
 def get_global_price(ticker):
     try:
         t = yf.Ticker(ticker)
@@ -93,7 +93,7 @@ def get_global_price(ticker):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 功能函数：天天基金接口 (估值+正式) ---
+# --- 核心函数：天天基金数据 ---
 def fetch_tiantian_nav(fund_code):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -105,15 +105,15 @@ def fetch_tiantian_nav(fund_code):
     except: return None
 
 # ==========================================
-# 2. 交互逻辑 (锁定 active_id)
+# 2. 交互逻辑
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
     id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_db.items()}
-    def sync(): st.session_state.active_id = st.session_state.selector
+    def sync_id(): st.session_state.active_id = st.session_state.selector
     
     st.selectbox("切换基金对账", options=list(id_map.keys()), format_func=lambda x: id_map[x],
-                 key="selector", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync)
+                 key="selector", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync_id)
     
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
     st.divider()
@@ -123,18 +123,20 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 3. 主界面显示
+# 3. 主界面显示 (北京时间校准)
 # ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# 更新时间戳功能
-st.caption(f"🕒 最后数据刷新 (服务器时间): **{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**")
+# --- 关键修改：北京时间显示 ---
+# 获取 UTC 时间并手动加 8 小时
+beijing_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
+st.caption(f"🕒 最后数据刷新 (**北京时间**): **{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}**")
 
-df_h = pd.DataFrame(active_cfg['holdings'])
+df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
 with st.spinner('同步全球实时行情...'):
-    for _, row in df_h.iterrows():
+    for _, row in df_holdings.iterrows():
         info = get_global_price(row['代码'])
         if info:
             contrib = info['pct'] * (row['占比'] / 100)
@@ -147,7 +149,7 @@ with st.spinner('同步全球实时行情...'):
         else:
             res_rows.append({"代码": row['代码'], "名称": row['名称'], "现价": "--", "今日涨跌": "--", "占比": f"{row['占比']:.2f}%", "贡献": "--"})
 
-# 配色渲染
+# 上色渲染
 def style_row(row):
     c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
     return [c if col in ['今日涨跌', '贡献', '现价'] else '' for col in row.index]
@@ -184,4 +186,4 @@ with c3:
         st.caption("误差 = 预估 - 实际")
     else: st.metric("误差", "--")
 
-st.info("💡 对账提醒：中间一栏数据源自天天基金。针对 A 股基金，下午 3 点后为收盘估算，深夜为正式净值；QDII 基金存在 1-2 天数据滞后。")
+st.info("💡 提示：该工具已校准北京时间显示。持仓数据已修正 Lumentum (LITE) 与台积电美股代码 (TSM)。")
