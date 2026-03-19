@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 强制屏蔽代理干扰，确保云端网络环境直通数据源
+# 屏蔽代理干扰
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金量化对账-北京时间版", layout="wide")
+st.set_page_config(page_title="全球基金量化对账-实锤修正版", layout="wide")
 
 # ==========================================
-# 1. 核心持仓数据库 (F1-F5 完整校准版)
+# 1. 核心数据库 (F1-F5 深度校准版)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -48,7 +48,7 @@ if 'fund_db' not in st.session_state:
             {"代码": "GOOG", "名称": "谷歌-C", "占比": 6.98},
             {"代码": "TSM", "名称": "台积电(ADR)", "占比": 6.72},
             {"代码": "AAPL", "名称": "苹果", "占比": 2.00},
-            {"代码": "LITE", "名称": "Lumentum", "占比": 1.98}, # 校准: LITE
+            {"代码": "LITE", "名称": "Lumentum", "占比": 1.98},
             {"代码": "COHR", "名称": "Coherent", "占比": 1.94},
             {"代码": "CIEN", "名称": "Ciena", "占比": 1.30},
             {"代码": "TTMI", "名称": "TTM科技", "占比": 1.29},
@@ -57,25 +57,26 @@ if 'fund_db' not in st.session_state:
         "F4": {"name": "基金4：建信新兴市场混合QDII (018147)", "code": "018147", "holdings": [
             {"代码": "NVDA", "名称": "英伟达", "占比": 9.86},
             {"代码": "000660.KS", "名称": "SK海力士", "占比": 9.79},
-            {"代码": "TSM", "名称": "台积电(ADR)", "占比": 9.07}, # 校准: TSM 美股
+            {"代码": "TSM", "名称": "台积电(ADR)", "占比": 9.07},
             {"代码": "AVGO", "名称": "博通", "占比": 7.98},
             {"代码": "005930.KS", "名称": "三星电子", "占比": 5.44},
             {"代码": "GLW", "名称": "康宁", "占比": 4.45},
             {"代码": "MPWR", "名称": "Monolithic", "占比": 3.89},
-            {"代码": "LITE", "名称": "Lumentum", "占比": 3.79}, # 校准: LITE
+            {"代码": "LITE", "名称": "Lumentum", "占比": 3.79},
             {"代码": "CRDO", "名称": "Credo", "占比": 2.38},
             {"代码": "2317.TW", "名称": "鸿海精密", "占比": 2.35},
         ]},
+        # --- 核心修复：根据截图校准基金5 ---
         "F5": {"name": "基金5：永赢先进制造智选混合发起C (018125)", "code": "018125", "holdings": [
-            {"代码": "603179.SZ", "名称": "新泉股份", "占比": 9.21},
+            {"代码": "603179.SS", "名称": "新泉股份", "占比": 9.21},
             {"代码": "603119.SS", "名称": "浙江荣泰", "占比": 7.91},
-            {"代码": "301550.SZ", "名称": "斯菱股份", "占比": 7.39},
-            {"代码": "603767.SS", "名称": "德昌电机控股", "占比": 6.21},
+            {"代码": "301550.SZ", "名称": "斯菱智驱", "占比": 7.39},
+            {"代码": "0179.HK", "名称": "德昌电机控股", "占比": 6.21}, # 修正为港股
             {"代码": "603667.SS", "名称": "五洲新春", "占比": 5.36},
             {"代码": "002050.SZ", "名称": "三花智控", "占比": 5.13},
-            {"代码": "300307.SZ", "名称": "拓普集团", "占比": 5.08},
-            {"代码": "301120.SZ", "名称": "伟创电气", "占比": 4.63},
-            {"代码": "603033.SS", "名称": "北特科技", "占比": 4.04},
+            {"代码": "601689.SS", "名称": "拓普集团", "占比": 5.08}, # 修正代码
+            {"代码": "688698.SS", "名称": "伟创电气", "占比": 4.63}, # 修正代码
+            {"代码": "603009.SS", "名称": "北特科技", "占比": 4.04}, # 修正代码
             {"代码": "002048.SZ", "名称": "宁波华翔", "占比": 3.99},
         ]}
     }
@@ -83,7 +84,7 @@ if 'fund_db' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 核心函数：全球行情 ---
+# --- 功能：全球个股行情 ---
 def get_global_price(ticker):
     try:
         t = yf.Ticker(ticker)
@@ -93,7 +94,7 @@ def get_global_price(ticker):
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
     except: return None
 
-# --- 核心函数：天天基金数据 ---
+# --- 功能：天天基金估值/实际数据 ---
 def fetch_tiantian_nav(fund_code):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -105,7 +106,7 @@ def fetch_tiantian_nav(fund_code):
     except: return None
 
 # ==========================================
-# 2. 交互逻辑
+# 2. 交互逻辑 (防跳菜单)
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
@@ -117,18 +118,17 @@ with st.sidebar:
     
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
     st.divider()
-    new_name = st.text_input("修改名称并回车", value=active_cfg['name'])
+    new_name = st.text_input("重命名基金并回车", value=active_cfg['name'])
     if new_name != active_cfg['name'] and new_name.strip() != "":
         st.session_state.fund_db[st.session_state.active_id]['name'] = new_name
         st.rerun()
 
 # ==========================================
-# 3. 主界面显示 (北京时间校准)
+# 3. 主界面显示 (北京时间)
 # ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# --- 关键修改：北京时间显示 ---
-# 获取 UTC 时间并手动加 8 小时
+# 北京时间校准
 beijing_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
 st.caption(f"🕒 最后数据刷新 (**北京时间**): **{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}**")
 
@@ -140,9 +140,14 @@ with st.spinner('同步全球实时行情...'):
         info = get_global_price(row['代码'])
         if info:
             contrib = info['pct'] * (row['占比'] / 100)
+            # 智能币种显示
+            currency_prefix = "¥"
+            if ".HK" in row['代码']: currency_prefix = "HK$"
+            elif "." not in row['代码'] or ".KS" in row['代码'] or ".TW" in row['代码']: currency_prefix = "$"
+            
             res_rows.append({
                 "代码": row['代码'], "名称": row['名称'],
-                "现价": f"¥{info['price']:.2f}" if "." in row['代码'] else f"${info['price']:.2f}",
+                "现价": f"{currency_prefix}{info['price']:.2f}",
                 "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{row['占比']:.2f}%", "贡献": f"{contrib:+.3f}%"
             })
             total_est += contrib; total_w += row['占比']
@@ -186,4 +191,4 @@ with c3:
         st.caption("误差 = 预估 - 实际")
     else: st.metric("误差", "--")
 
-st.info("💡 提示：该工具已校准北京时间显示。持仓数据已修正 Lumentum (LITE) 与台积电美股代码 (TSM)。")
+st.info("💡 提示：基金 5 持仓已根据 2025Q4 最新季报校准。德昌电机已修正为港股 (0179.HK)。")
