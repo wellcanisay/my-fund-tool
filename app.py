@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 屏蔽代理干扰，确保网络环境纯净
+# 屏蔽代理干扰
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金量化对账-SNDK实锤版", layout="wide")
+st.set_page_config(page_title="全球基金量化对账-代码补全版", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (根据 5 张截图像素级校准)
+# 1. 核心数据库 (已补全港股 5 位代码)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -31,7 +31,7 @@ if 'fund_db' not in st.session_state:
             {"代码": "688008.SS", "名称": "澜起科技", "占比": 5.00},
         ]},
         "F2": {"name": "基金2：永赢半导体产业智选混合发起C (020413)", "code": "020413", "holdings": [
-            {"代码": "0981.HK", "名称": "中芯国际", "占比": 9.40},
+            {"代码": "00981.HK", "名称": "中芯国际", "占比": 9.40}, # 补全 5 位代码
             {"代码": "002222.SZ", "名称": "福晶科技", "占比": 9.25},
             {"代码": "688502.SS", "名称": "茂莱光学", "占比": 8.39},
             {"代码": "002156.SZ", "名称": "通富微电", "占比": 8.27},
@@ -69,7 +69,7 @@ if 'fund_db' not in st.session_state:
         "F5": {"name": "基金5：永赢先进制造智选混合发起C (018125)", "code": "018125", "holdings": [
             {"代码": "603179.SS", "名称": "新泉股份", "占比": 9.37},
             {"代码": "301550.SZ", "名称": "斯菱智驱", "占比": 9.29},
-            {"代码": "0179.HK", "名称": "德昌电机控股", "占比": 5.95},
+            {"代码": "00179.HK", "名称": "德昌电机控股", "占比": 5.95}, # 补全 5 位代码
             {"代码": "002048.SZ", "名称": "宁波华翔", "占比": 5.02},
             {"代码": "603667.SS", "名称": "五洲新春", "占比": 4.97},
             {"代码": "300953.SZ", "名称": "震裕科技", "占比": 4.44},
@@ -87,14 +87,14 @@ if 'active_id' not in st.session_state:
 def get_global_price(ticker):
     try:
         t = yf.Ticker(ticker)
-        # 获取2天数据以计算最新收盘变动
         hist = t.history(period="2d")
         if len(hist) < 2: return None
         curr, prev = hist['Close'].iloc[-1], hist['Close'].iloc[-2]
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
-    except: return None
+    except Exception as e:
+        return None
 
-# --- 功能：天天基金对账接口 ---
+# --- 功能：天天基金接口 ---
 def fetch_tiantian_nav(fund_code):
     try:
         url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js?rt={int(time.time())}"
@@ -105,42 +105,35 @@ def fetch_tiantian_nav(fund_code):
     except: return None
 
 # ==========================================
-# 2. 交互逻辑 (锁定 active_id)
+# 2. 侧边栏交互
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
     id_map = {fid: cfg['name'] for fid, cfg in st.session_state.fund_db.items()}
     def sync_fund(): st.session_state.active_id = st.session_state.selector
     
-    st.selectbox("切换当前对账基金", options=list(id_map.keys()), format_func=lambda x: id_map[x],
+    st.selectbox("切换基金对账", options=list(id_map.keys()), format_func=lambda x: id_map[x],
                  key="selector", index=list(id_map.keys()).index(st.session_state.active_id), on_change=sync_fund)
     
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
-    st.divider()
-    new_name = st.text_input("修改名称并回车", value=active_cfg['name'])
-    if new_name != active_cfg['name'] and new_name.strip() != "":
-        st.session_state.fund_db[st.session_state.active_id]['name'] = new_name
-        st.rerun()
 
 # ==========================================
-# 3. 主界面显示
+# 3. 主界面
 # ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# 北京时间强制校准
+# 北京时间强制显示
 beijing_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
 st.caption(f"🕒 数据同步时间 (**北京时间**): **{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}**")
 
 df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
-with st.spinner('正在同步全球实时行情，包含 SNDK 闪迪...'):
+with st.spinner('正在抓取全球实时行情...'):
     for _, row in df_holdings.iterrows():
         info = get_global_price(row['代码'])
         if info:
             contrib = info['pct'] * (row['占比'] / 100)
-            
-            # 多币种符号识别
             sym = "¥"
             if ".HK" in row['代码']: sym = "HK$"
             elif ".KS" in row['代码']: sym = "₩"
@@ -161,34 +154,25 @@ def style_row(row):
 
 st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=450)
 
-# --- 底部三位一体对账面板 ---
+# 底部对账面板
 st.markdown("---")
 actual_val_obj = fetch_tiantian_nav(active_cfg['code'])
-
-c1, c2, c3 = st.columns(3)
-with c1:
+col1, col2, col3 = st.columns(3)
+with col1:
     st.markdown("#### 1. 你的加权预估")
     color = "#ff4b4b" if total_est > 0 else "#00ad4c"
     st.markdown(f"<h1 style='color:{color};'>{total_est:+.3f}%</h1>", unsafe_allow_html=True)
-    st.caption(f"基于前十大 {total_w:.2f}% 权重计算")
-
-with c2:
-    st.markdown("#### 2. 官方实锤/估算")
+with col2:
+    st.markdown("#### 2. 天天基金估值/实际")
     if actual_val_obj:
         color = "#ff4b4b" if actual_val_obj['val'] > 0 else "#00ad4c"
         st.markdown(f"<h1 style='color:{color};'>{actual_val_obj['val']:+.3f}%</h1>", unsafe_allow_html=True)
-        st.caption(f"天天基金同步时间: {actual_val_obj['time']}")
+        st.caption(f"同步时间: {actual_val_obj['time']}")
         act_val = actual_val_obj['val']
     else:
         st.metric("官方成绩", "获取中...")
         act_val = None
-
-with c3:
+with col3:
     st.markdown("#### 3. 预估误差")
     if act_val is not None:
-        err = total_est - act_val
-        st.markdown(f"<h1 style='color:black;'>{err:+.3f}%</h1>", unsafe_allow_html=True)
-        st.caption("预估 > 实际 为正")
-    else: st.metric("误差", "--")
-
-st.info("💡 提醒：SNDK 闪迪代码已锁定。目前所有持仓数据均已按您提供的 2026 年最新截图完成对齐。")
+        st.markdown(f"<h1>{total_est - act_val:+.3f}%</h1>", unsafe_allow_html=True)
