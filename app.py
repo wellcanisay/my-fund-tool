@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 屏蔽代理干扰
+# 屏蔽代理干扰，确保云端直连
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金量化对账-代码补全版", layout="wide")
+st.set_page_config(page_title="全球基金量化对账-港股兼容版", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (已补全港股 5 位代码)
+# 1. 核心数据库 (持仓已按 2026 最新截图像素级校准)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -31,7 +31,7 @@ if 'fund_db' not in st.session_state:
             {"代码": "688008.SS", "名称": "澜起科技", "占比": 5.00},
         ]},
         "F2": {"name": "基金2：永赢半导体产业智选混合发起C (020413)", "code": "020413", "holdings": [
-            {"代码": "00981.HK", "名称": "中芯国际", "占比": 9.40}, # 补全 5 位代码
+            {"代码": "00981.HK", "名称": "中芯国际", "占比": 9.40}, 
             {"代码": "002222.SZ", "名称": "福晶科技", "占比": 9.25},
             {"代码": "688502.SS", "名称": "茂莱光学", "占比": 8.39},
             {"代码": "002156.SZ", "名称": "通富微电", "占比": 8.27},
@@ -69,7 +69,7 @@ if 'fund_db' not in st.session_state:
         "F5": {"name": "基金5：永赢先进制造智选混合发起C (018125)", "code": "018125", "holdings": [
             {"代码": "603179.SS", "名称": "新泉股份", "占比": 9.37},
             {"代码": "301550.SZ", "名称": "斯菱智驱", "占比": 9.29},
-            {"代码": "00179.HK", "名称": "德昌电机控股", "占比": 5.95}, # 补全 5 位代码
+            {"代码": "00179.HK", "名称": "德昌电机控股", "占比": 5.95}, 
             {"代码": "002048.SZ", "名称": "宁波华翔", "占比": 5.02},
             {"代码": "603667.SS", "名称": "五洲新春", "占比": 4.97},
             {"代码": "300953.SZ", "名称": "震裕科技", "占比": 4.44},
@@ -83,18 +83,26 @@ if 'fund_db' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能：获取实时行情 ---
+# --- 功能：获取价格 (港股双重保险逻辑) ---
 def get_global_price(ticker):
     try:
+        # 第一轮尝试
         t = yf.Ticker(ticker)
         hist = t.history(period="2d")
+        
+        # 第二轮尝试：如果 HK 代码失败，自动尝试 4 位代码 (如将 00981.HK 转为 0981.HK)
+        if hist.empty and ".HK" in ticker:
+            alt_ticker = ticker[1:] if ticker.startswith('0') else ticker
+            t = yf.Ticker(alt_ticker)
+            hist = t.history(period="2d")
+
         if len(hist) < 2: return None
         curr, prev = hist['Close'].iloc[-1], hist['Close'].iloc[-2]
         return {'price': curr, 'pct': (curr - prev) / prev * 100}
-    except Exception as e:
+    except:
         return None
 
-# --- 功能：天天基金接口 ---
+# --- 功能：天天基金对账接口 ---
 def fetch_tiantian_nav(fund_code):
     try:
         url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js?rt={int(time.time())}"
@@ -105,7 +113,7 @@ def fetch_tiantian_nav(fund_code):
     except: return None
 
 # ==========================================
-# 2. 侧边栏交互
+# 2. 交互逻辑
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
@@ -118,18 +126,18 @@ with st.sidebar:
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
 
 # ==========================================
-# 3. 主界面
+# 3. 主界面显示
 # ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# 北京时间强制显示
+# 北京时间校准
 beijing_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
 st.caption(f"🕒 数据同步时间 (**北京时间**): **{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}**")
 
 df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
-with st.spinner('正在抓取全球实时行情...'):
+with st.spinner('同步全球实时行情，正在重点攻克港股代码...'):
     for _, row in df_holdings.iterrows():
         info = get_global_price(row['代码'])
         if info:
@@ -154,7 +162,7 @@ def style_row(row):
 
 st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=450)
 
-# 底部对账面板
+# --- 底部三位一体对账面板 ---
 st.markdown("---")
 actual_val_obj = fetch_tiantian_nav(active_cfg['code'])
 col1, col2, col3 = st.columns(3)
@@ -176,3 +184,5 @@ with col3:
     st.markdown("#### 3. 预估误差")
     if act_val is not None:
         st.markdown(f"<h1>{total_est - act_val:+.3f}%</h1>", unsafe_allow_html=True)
+
+st.info("💡 提示：港股代码已增加自动纠错逻辑。闪迪 (SNDK) 依然锁定。北京时间已校准。")
