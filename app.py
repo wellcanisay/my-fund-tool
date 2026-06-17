@@ -7,14 +7,14 @@ import json
 import datetime
 import time
 
-# 屏蔽代理干扰，确保云端直连
+# 强力屏蔽代理干扰，确保云端直连
 for key in ['http_proxy', 'https_proxy', 'all_proxy', 'ALL_PROXY']:
     os.environ[key] = ''
 
-st.set_page_config(page_title="全球基金量化对账-港股兼容版", layout="wide")
+st.set_page_config(page_title="全球基金量化对账-高速并发版", layout="wide")
 
 # ==========================================
-# 1. 核心数据库 (持仓已按 2026 最新截图像素级校准)
+# 1. 核心数据库 (保持像素级校准，修复港股标准形式)
 # ==========================================
 if 'fund_db' not in st.session_state:
     st.session_state.fund_db = {
@@ -31,7 +31,7 @@ if 'fund_db' not in st.session_state:
             {"代码": "688008.SS", "名称": "澜起科技", "占比": 5.00},
         ]},
         "F2": {"name": "基金2：永赢半导体产业智选混合发起C (020413)", "code": "020413", "holdings": [
-            {"代码": "00981.HK", "名称": "中芯国际", "占比": 9.40}, 
+            {"代码": "0981.HK", "名称": "中芯国际", "占比": 9.40}, # 优化为yfinance更易识别的4位港股
             {"代码": "002222.SZ", "名称": "福晶科技", "占比": 9.25},
             {"代码": "688502.SS", "名称": "茂莱光学", "占比": 8.39},
             {"代码": "002156.SZ", "名称": "通富微电", "占比": 8.27},
@@ -69,7 +69,7 @@ if 'fund_db' not in st.session_state:
         "F5": {"name": "基金5：永赢先进制造智选混合发起C (018125)", "code": "018125", "holdings": [
             {"代码": "603179.SS", "名称": "新泉股份", "占比": 9.37},
             {"代码": "301550.SZ", "名称": "斯菱智驱", "占比": 9.29},
-            {"代码": "00179.HK", "名称": "德昌电机控股", "占比": 5.95}, 
+            {"代码": "0179.HK", "名称": "德昌电机控股", "占比": 5.95}, # 优化为标准4位港股代码
             {"代码": "002048.SZ", "名称": "宁波华翔", "占比": 5.02},
             {"代码": "603667.SS", "名称": "五洲新春", "占比": 4.97},
             {"代码": "300953.SZ", "名称": "震裕科技", "占比": 4.44},
@@ -83,26 +83,36 @@ if 'fund_db' not in st.session_state:
 if 'active_id' not in st.session_state:
     st.session_state.active_id = "F1"
 
-# --- 功能：获取价格 (港股双重保险逻辑) ---
-def get_global_price(ticker):
+# --- 高速并发抓取核心引擎 ---
+def fetch_batch_prices(tickers_list):
+    """
+    降维打击的核心：把10个个股用空格合并，1次请求直接拉回所有数据
+    """
+    tickers_str = " ".join(tickers_list)
+    result_map = {}
     try:
-        # 第一轮尝试
-        t = yf.Ticker(ticker)
-        hist = t.history(period="2d")
+        # 一次性下载所有重仓股的2天历史行情
+        data = yf.download(tickers_str, period="2d", group_by='ticker', progress=False, timeout=8)
         
-        # 第二轮尝试：如果 HK 代码失败，自动尝试 4 位代码 (如将 00981.HK 转为 0981.HK)
-        if hist.empty and ".HK" in ticker:
-            alt_ticker = ticker[1:] if ticker.startswith('0') else ticker
-            t = yf.Ticker(alt_ticker)
-            hist = t.history(period="2d")
-
-        if len(hist) < 2: return None
-        curr, prev = hist['Close'].iloc[-1], hist['Close'].iloc[-2]
-        return {'price': curr, 'pct': (curr - prev) / prev * 100}
+        for ticker in tickers_list:
+            try:
+                # 兼容单只股票和多只股票返回的结构差异
+                if len(tickers_list) == 1:
+                    df = data
+                else:
+                    df = data[ticker]
+                
+                df = df.dropna(subset=['Close'])
+                if len(df) >= 2:
+                    curr, prev = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                    result_map[ticker] = {'price': curr, 'pct': (curr - prev) / prev * 100}
+            except:
+                result_map[ticker] = None
     except:
-        return None
+        pass
+    return result_map
 
-# --- 功能：天天基金对账接口 ---
+# --- 功能：天天基金接口 ---
 def fetch_tiantian_nav(fund_code):
     try:
         url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js?rt={int(time.time())}"
@@ -113,7 +123,7 @@ def fetch_tiantian_nav(fund_code):
     except: return None
 
 # ==========================================
-# 2. 交互逻辑
+# 2. 侧边栏交互
 # ==========================================
 with st.sidebar:
     st.header("📂 基金管理中心")
@@ -126,35 +136,42 @@ with st.sidebar:
     active_cfg = st.session_state.fund_db[st.session_state.active_id]
 
 # ==========================================
-# 3. 主界面显示
+# 3. 主界面
 # ==========================================
 st.title(f"🚀 {active_cfg['name']}")
 
-# 北京时间校准
 beijing_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
 st.caption(f"🕒 数据同步时间 (**北京时间**): **{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}**")
 
 df_holdings = pd.DataFrame(active_cfg['holdings'])
 res_rows, total_est, total_w = [], 0.0, 0.0
 
-with st.spinner('同步全球实时行情，正在重点攻克港股代码...'):
+# 提取当前基金的所有代码
+tickers_to_fetch = df_holdings['代码'].tolist()
+
+with st.spinner('🚀 正在利用【高速并发通道】同步全球个股行情...'):
+    # 核心优化：只向服务器请求1次
+    prices_database = fetch_batch_prices(tickers_to_fetch)
+    
     for _, row in df_holdings.iterrows():
-        info = get_global_price(row['代码'])
+        code, name, w = row['代码'], row['名称'], row['占比']
+        info = prices_database.get(code)
+        
         if info:
-            contrib = info['pct'] * (row['占比'] / 100)
+            contrib = info['pct'] * (w / 100)
             sym = "¥"
-            if ".HK" in row['代码']: sym = "HK$"
-            elif ".KS" in row['代码']: sym = "₩"
-            elif "." not in row['代码'] or ".TW" in row['代码']: sym = "$"
+            if ".HK" in code: sym = "HK$"
+            elif ".KS" in code: sym = "₩"
+            elif "." not in code or ".TW" in code: sym = "$"
             
             res_rows.append({
-                "代码": row['代码'], "名称": row['名称'],
+                "代码": code, "名称": name,
                 "现价": f"{sym}{info['price']:.2f}",
-                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{row['占比']:.2f}%", "贡献": f"{contrib:+.3f}%"
+                "今日涨跌": f"{info['pct']:+.2f}%", "占比": f"{w:.2f}%", "贡献": f"{contrib:+.3f}%"
             })
-            total_est += contrib; total_w += row['占比']
+            total_est += contrib; total_w += w
         else:
-            res_rows.append({"代码": row['代码'], "名称": row['名称'], "现价": "--", "今日涨跌": "--", "占比": f"{row['占比']:.2f}%", "贡献": "--"})
+            res_rows.append({"代码": code, "名称": name, "现价": "--", "今日涨跌": "--", "占比": f"{w:.2f}%", "贡献": "--"})
 
 def style_row(row):
     c = 'color: #ff4b4b; font-weight: bold' if '+' in str(row['今日涨跌']) else ('color: #00ad4c; font-weight: bold' if '-' in str(row['今日涨跌']) else '')
@@ -162,7 +179,7 @@ def style_row(row):
 
 st.dataframe(pd.DataFrame(res_rows).style.apply(style_row, axis=1), use_container_width=True, height=450)
 
-# --- 底部三位一体对账面板 ---
+# 底部对账面板
 st.markdown("---")
 actual_val_obj = fetch_tiantian_nav(active_cfg['code'])
 col1, col2, col3 = st.columns(3)
@@ -174,7 +191,7 @@ with col2:
     st.markdown("#### 2. 天天基金估值/实际")
     if actual_val_obj:
         color = "#ff4b4b" if actual_val_obj['val'] > 0 else "#00ad4c"
-        st.markdown(f"<h1 style='color:{color};'>{actual_val_obj['val']:+.3f}%</h1>", unsafe_allow_html=True)
+        st.markdown(f"<h1 style='color:{color};'>{actual_val_obj['val']:+.2f}%</h1>", unsafe_allow_html=True)
         st.caption(f"同步时间: {actual_val_obj['time']}")
         act_val = actual_val_obj['val']
     else:
@@ -185,4 +202,4 @@ with col3:
     if act_val is not None:
         st.markdown(f"<h1>{total_est - act_val:+.3f}%</h1>", unsafe_allow_html=True)
 
-st.info("💡 提示：港股代码已增加自动纠错逻辑。闪迪 (SNDK) 依然锁定。北京时间已校准。")
+st.info("💡 提示：行情引擎已升级为批量并发通道，彻底解决A股抓取受限及加载缓慢问题。SNDK 闪迪正常保持。")
